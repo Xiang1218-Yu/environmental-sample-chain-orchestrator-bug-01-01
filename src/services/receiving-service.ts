@@ -19,7 +19,7 @@ export class ReceivingService {
   constructor(private readonly store: Store) {}
 
   receive(input: ReceiveInput) {
-    const duplicate = [...this.store.receiving.values()].find((item) => item.clientOperationId === input.clientOperationId && item.projectId === input.projectId);
+    const duplicate = [...this.store.receiving.values()].find((item) => item.tenantId === input.tenantId && item.clientOperationId === input.clientOperationId && item.projectId === input.projectId);
     if (duplicate) return duplicate;
     const container = assertFound(this.store.containers.get(input.containerId), 'receiving.container_not_found', 'container not found');
     assertCondition(container.tenantId === input.tenantId && container.projectId === input.projectId, 'scope.forbidden', 'container is outside the requested project');

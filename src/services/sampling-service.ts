@@ -23,14 +23,20 @@ export class SamplingService {
   constructor(private readonly store: Store) {}
 
   createSealedSample(input: CreateSampleInput): { sample: SamplingRecord; container: SampleContainer } {
-    const existing = [...this.store.samples.values()].find((sample) => sample.tenantId === input.tenantId && sample.clientDeviceId === input.clientDeviceId && sample.clientSequence === input.clientSequence);
+    const existing = [...this.store.samples.values()].find((sample) => sample.tenantId === input.tenantId && sample.projectId === input.projectId && sample.clientDeviceId === input.clientDeviceId && sample.clientSequence === input.clientSequence);
     if (existing) {
       const container = assertFound(existing.containerId ? this.store.containers.get(existing.containerId) : undefined, 'sample.container_missing', 'sample container missing');
+      // Same client coordinates with different content is a conflict, not a replay:
+      // silently returning the existing sample would drop the new physical container.
+      assertCondition(container.barcode === input.containerBarcode, 'sample.sequence_conflict', 'client sequence was already used with a different container barcode');
       return { sample: existing, container };
     }
     assertCondition(input.totalVolumeMl > 0, 'sample.invalid_volume', 'sample volume must be positive');
     assertCondition(input.preservation.temperatureCelsius >= -80 && input.preservation.temperatureCelsius <= 40, 'sample.invalid_temperature', 'sample preservation temperature is outside supported range');
     const sampleId = input.sampleId ?? this.store.nextId('sample');
+    // A client-supplied id must never overwrite an existing sample — that would
+    // orphan the container the overwritten sample pointed to.
+    assertCondition(!this.store.samples.has(sampleId), 'sample.id_conflict', 'sample id is already registered');
     const containerId = this.store.nextId('container');
     const sample: SamplingRecord = {
       id: sampleId,
@@ -48,8 +54,11 @@ export class SamplingService {
       containerId,
       version: 1,
     };
-    const barcodeConflict = [...this.store.containers.values()].find((item) => item.barcode === input.containerBarcode && item.projectId === input.projectId);
-    if (barcodeConflict) throw new DomainError('sample.barcode_conflict', 'container barcode already belongs to another sample in this project');
+    // A barcode identifies a physical container, so uniqueness is tenant-wide:
+    // registering the same barcode in two projects would create two samples for
+    // one physical container.
+    const barcodeConflict = [...this.store.containers.values()].find((item) => item.tenantId === input.tenantId && item.barcode === input.containerBarcode);
+    if (barcodeConflict) throw new DomainError('sample.barcode_conflict', 'container barcode already belongs to another sample in this tenant');
     const container: SampleContainer = {
       id: containerId,
       tenantId: input.tenantId,

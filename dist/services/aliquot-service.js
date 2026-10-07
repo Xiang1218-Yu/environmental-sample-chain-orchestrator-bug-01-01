@@ -1,11 +1,11 @@
-import { assertCondition, assertFound } from '../domain/errors.js';
+import { assertCondition, assertFound, DomainError } from '../domain/errors.js';
 export class AliquotService {
     store;
     constructor(store) {
         this.store = store;
     }
     createMany(input) {
-        const prior = [...this.store.aliquots.values()].filter((item) => item.sourceOperationId === input.operationId && item.projectId === input.projectId);
+        const prior = [...this.store.aliquots.values()].filter((item) => item.tenantId === input.tenantId && item.sourceOperationId === input.operationId && item.projectId === input.projectId);
         if (prior.length > 0)
             return prior;
         const container = assertFound(this.store.containers.get(input.parentContainerId), 'aliquot.container_not_found', 'parent container not found');
@@ -21,7 +21,7 @@ export class AliquotService {
         for (const item of normalized) {
             const existing = [...this.store.aliquots.values()].find((aliquot) => aliquot.projectId === input.projectId && aliquot.barcode === item.barcode);
             if (existing)
-                throw new Error(`aliquot barcode already exists: ${item.barcode}`);
+                throw new DomainError('aliquot.barcode_conflict', `aliquot barcode already exists: ${item.barcode}`);
         }
         const created = [];
         for (const item of normalized) {

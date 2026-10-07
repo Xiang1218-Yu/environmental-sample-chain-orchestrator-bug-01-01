@@ -1,5 +1,5 @@
 import type { Aliquot } from '../domain/types.js';
-import { assertCondition, assertFound } from '../domain/errors.js';
+import { assertCondition, assertFound, DomainError } from '../domain/errors.js';
 import { Store } from '../store/store.js';
 
 export interface AliquotRequest {
@@ -16,7 +16,7 @@ export class AliquotService {
   constructor(private readonly store: Store) {}
 
   createMany(input: AliquotRequest): Aliquot[] {
-    const prior = [...this.store.aliquots.values()].filter((item) => item.sourceOperationId === input.operationId && item.projectId === input.projectId);
+    const prior = [...this.store.aliquots.values()].filter((item) => item.tenantId === input.tenantId && item.sourceOperationId === input.operationId && item.projectId === input.projectId);
     if (prior.length > 0) return prior;
     const container = assertFound(this.store.containers.get(input.parentContainerId), 'aliquot.container_not_found', 'parent container not found');
     assertCondition(container.tenantId === input.tenantId && container.projectId === input.projectId, 'scope.forbidden', 'container is outside the requested project');
@@ -30,7 +30,7 @@ export class AliquotService {
     assertCondition(!duplicateBarcode, 'aliquot.duplicate_barcode', 'aliquot barcodes must be unique within an operation');
     for (const item of normalized) {
       const existing = [...this.store.aliquots.values()].find((aliquot) => aliquot.projectId === input.projectId && aliquot.barcode === item.barcode);
-      if (existing) throw new Error(`aliquot barcode already exists: ${item.barcode}`);
+      if (existing) throw new DomainError('aliquot.barcode_conflict', `aliquot barcode already exists: ${item.barcode}`);
     }
     const created: Aliquot[] = [];
     for (const item of normalized) {

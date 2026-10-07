@@ -5,7 +5,7 @@ export class CustodyService {
         this.store = store;
     }
     handOver(input) {
-        const duplicate = [...this.store.transfers.values()].find((item) => item.clientOperationId === input.clientOperationId && item.projectId === input.projectId);
+        const duplicate = [...this.store.transfers.values()].find((item) => item.tenantId === input.tenantId && item.clientOperationId === input.clientOperationId && item.projectId === input.projectId);
         if (duplicate)
             return duplicate;
         const container = assertFound(this.store.containers.get(input.containerId), 'custody.container_not_found', 'container not found');

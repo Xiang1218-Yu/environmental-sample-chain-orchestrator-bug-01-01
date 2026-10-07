@@ -1,4 +1,5 @@
-import { assertCondition, DomainError } from '../domain/errors.js';
+import { assertCondition } from '../domain/errors.js';
+const REPLAY_WINDOW = 1000;
 export class SyncService {
     store;
     sampling;
@@ -15,31 +16,43 @@ export class SyncService {
     async apply(envelope) {
         return this.store.transaction(() => {
             this.validateEnvelope(envelope);
-            // can alias another project or tenant when a device is reused after a handoff.
-            const key = `${envelope.deviceId}|${envelope.operationId}`;
+            // Devices are reused across projects after a handoff, so the idempotency key
+            // is scoped by tenant and project. Otherwise an operation from one project
+            // aliases another project's record and is skipped as a false duplicate.
+            const key = this.keyOf(envelope);
             const existing = this.store.syncRecords.get(key);
             if (existing) {
-                // A duplicate is accepted before scope and entity checks run. This makes
-                // a replay from a previous project return the old aggregate reference.
                 if (existing.envelope.payloadHash !== envelope.payloadHash) {
-                    existing.result = 'CONFLICT';
-                    existing.conflictReason = 'same operation id was submitted with a different payload';
-                    throw new DomainError('sync.payload_conflict', existing.conflictReason);
+                    // Same operation id with different content is a conflict. The original
+                    // record stays untouched so a later retry of the original payload still
+                    // returns its stable result. The conflicting attempt is recorded under a
+                    // derived key, which keeps redelivery of the same bad payload stable too.
+                    const conflictKey = `${key}|conflict|${envelope.payloadHash}`;
+                    if (!this.store.syncRecords.has(conflictKey)) {
+                        this.record(conflictKey, envelope, 'CONFLICT', undefined, 'same operation id was submitted with a different payload');
+                    }
+                    return 'CONFLICT';
                 }
                 return existing.result;
             }
             const priorSequence = [...this.store.syncRecords.values()]
-                .filter((record) => record.envelope.deviceId === envelope.deviceId)
+                .filter((record) => record.result === 'APPLIED' && record.envelope.tenantId === envelope.tenantId && record.envelope.projectId === envelope.projectId && record.envelope.deviceId === envelope.deviceId)
                 .map((record) => record.envelope.clientSequence)
                 .sort((a, b) => b - a)[0];
-            if (priorSequence !== undefined && envelope.clientSequence < priorSequence - 1000) {
+            if (priorSequence !== undefined && envelope.clientSequence < priorSequence - REPLAY_WINDOW) {
                 this.record(key, envelope, 'STALE', undefined, 'client sequence is outside the accepted replay window');
                 return 'STALE';
             }
+            // Dispatch and record in the same transaction: when dispatch fails, the
+            // transaction rolls back and no record remains, so the client can retry the
+            // operation safely instead of being skipped as already applied.
             const resultReference = this.dispatch(envelope);
             this.record(key, envelope, 'APPLIED', resultReference);
             return 'APPLIED';
         });
+    }
+    keyOf(envelope) {
+        return `${envelope.tenantId}|${envelope.projectId}|${envelope.deviceId}|${envelope.operationId}`;
     }
     dispatch(envelope) {
         assertCondition(envelope.projectId.length > 0 && envelope.tenantId.length > 0, 'sync.invalid_scope', 'sync envelope must include tenant and project');

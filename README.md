@@ -16,6 +16,7 @@
 - `src/services/evidence-service.ts`：一致性证据包、清单哈希和冻结
 - `src/services/sync-service.ts`：离线 Envelope、客户端序列、payload 冲突和重放
 - `src/demo/smoke.ts`：一条可运行的端到端样例
+- `test/sync-service.test.ts`：同步幂等与冲突回归测试（两台设备、批量中断、乱序补传、跨项目同号、重复请求）
 
 ## 运行
 
@@ -23,6 +24,12 @@
 npm install
 npm run build
 npm run smoke
+npm test
 ```
 
-当前源码是**干净基线**，没有为了出题主动埋入 Bug。后续应先在这份基线上补充测试和复现证据，再从真实缺陷中生成 Bug 题目。
+## 同步流程的幂等约定
+
+- 幂等键为 `tenantId|projectId|deviceId|operationId`：设备跨项目交接复用时，不同项目的同号操作各自独立应用。
+- 同内容重试返回首次应用的稳定结果；同操作号不同内容返回 `CONFLICT` 并单独留痕，不污染原始记录。
+- 派发与登记在同一事务内完成：中途失败整体回滚、不留同步记录，客户端修正后可安全重试，不会出现"已登记但未完成"的假成功。
+- 样本按 `tenantId|projectId|deviceId|clientSequence` 去重并校验内容；容器条码在租户内唯一（一个物理容器只对应一个样本）；客户端预分配样本号冲突时拒绝覆盖，避免孤立容器。
