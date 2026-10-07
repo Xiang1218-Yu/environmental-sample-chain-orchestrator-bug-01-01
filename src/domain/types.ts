@@ -16,7 +16,8 @@ export type BatchStatus = 'DRAFT' | 'READY' | 'RUNNING' | 'RESULTS_PENDING' | 'U
 export type RunStatus = 'REGISTERED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
 export type QualityDecisionType = 'APPROVED' | 'REJECTED' | 'RETEST_REQUIRED';
 export type EvidenceStatus = 'GENERATING' | 'READY' | 'FAILED' | 'FROZEN';
-export type SyncApplyResult = 'APPLIED' | 'DUPLICATE' | 'CONFLICT' | 'STALE';
+export type SyncApplyResult = 'APPLIED' | 'DUPLICATE' | 'CONFLICT';
+export type SyncRecordState = SyncApplyResult | 'APPLYING';
 
 export interface Versioned {
   version: number;
@@ -36,6 +37,8 @@ export interface SamplingRecord extends Versioned {
   status: SampleStatus;
   clientDeviceId: string;
   clientSequence: number;
+  clientOperationId: string;
+  barcode: string;
   containerId?: ContainerId;
 }
 
@@ -205,13 +208,35 @@ export interface SyncEnvelope {
   occurredAt: string;
 }
 
+export interface SyncConflictAttempt {
+  payloadHash: string;
+  reason: string;
+  at: string;
+}
+
 export interface SyncRecord {
+  /** Idempotency key, always scoped by tenant, project and device. */
   key: string;
   envelope: SyncEnvelope;
-  result: SyncApplyResult;
+  state: SyncRecordState;
+  result?: SyncApplyResult;
   resultReference?: string;
   conflictReason?: string;
-  appliedAt: string;
+  attempts: number;
+  /** Diverging payloads that arrived against a decided or in-flight operation. */
+  alternateAttempts: SyncConflictAttempt[];
+  createdAt: string;
+  appliedAt?: string;
+}
+
+export interface SyncOutcome {
+  /** APPLIED on the first successful attempt, DUPLICATE for an idempotent replay, CONFLICT for divergent content. */
+  result: SyncApplyResult;
+  /** Stable aggregate reference; identical for every retry of the same operation. */
+  resultReference: string;
+  operationId: string;
+  attempts: number;
+  conflictReason?: string;
 }
 
 export interface AuditRecord {

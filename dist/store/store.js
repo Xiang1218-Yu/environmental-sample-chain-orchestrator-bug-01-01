@@ -1,3 +1,4 @@
+import { HardCrashError } from '../domain/errors.js';
 class Mutex {
     tail = Promise.resolve();
     async runExclusive(work) {
@@ -45,6 +46,13 @@ export class Store {
         this.outbox.push(message);
         return message;
     }
+    /** Idempotency probe used when healing a partially applied operation. */
+    hasAudit(action, predicate) {
+        return this.audit.some((record) => record.action === action && predicate(record.metadata));
+    }
+    hasOutbox(topic, aggregateId) {
+        return this.outbox.some((message) => message.topic === topic && message.aggregateId === aggregateId);
+    }
     snapshot() {
         return {
             sequence: this.sequence,
@@ -88,6 +96,10 @@ export class Store {
                 return await work();
             }
             catch (error) {
+                // A simulated hard crash models process death: entities written so far stay
+                // committed (no rollback) and the client retries the whole operation.
+                if (error instanceof HardCrashError)
+                    throw error;
                 this.restore(before);
                 throw error;
             }

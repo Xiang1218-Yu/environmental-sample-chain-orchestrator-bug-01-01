@@ -1,5 +1,6 @@
-import type { CustodyTransfer, SealStatus } from '../domain/types.js';
-import { assertCondition, assertFound } from '../domain/errors.js';
+import type { CustodyTransfer, SampleContainer, SealStatus } from '../domain/types.js';
+import { assertCondition, assertFound, DomainError } from '../domain/errors.js';
+import { deterministicId } from '../domain/ids.js';
 import { Store } from '../store/store.js';
 
 export interface HandoverInput {
@@ -20,15 +21,22 @@ export class CustodyService {
   constructor(private readonly store: Store) {}
 
   handOver(input: HandoverInput): CustodyTransfer {
-    const duplicate = [...this.store.transfers.values()].find((item) => item.clientOperationId === input.clientOperationId && item.projectId === input.projectId);
-    if (duplicate) return duplicate;
-    const container = assertFound(this.store.containers.get(input.containerId), 'custody.container_not_found', 'container not found');
+    const transferId = deterministicId('transfer', [input.tenantId, input.projectId, input.clientOperationId]);
+    const duplicate = [...this.store.transfers.values()].find(
+      (item) => item.tenantId === input.tenantId && item.projectId === input.projectId && item.clientOperationId === input.clientOperationId,
+    ) ?? this.store.transfers.get(transferId);
+    if (duplicate) {
+      this.assertSameContent(duplicate, input);
+      return this.heal(duplicate, input);
+    }
+
+    const container = assertFound(this.store.containers.get(input.containerId), 'custody.container_not_found', 'container not found', /* retryable */ true);
     this.assertScope(container.tenantId, container.projectId, input.tenantId, input.projectId);
-    assertCondition(container.currentHolderId === input.fromHolderId, 'custody.holder_mismatch', 'container is held by a different user');
-    assertCondition(container.custodyStatus === 'SEALED' || container.custodyStatus === 'RECEIVED' || container.custodyStatus === 'RELEASED_TO_LAB', 'custody.invalid_state', 'container cannot be handed over in its current state');
+    assertCondition(container.currentHolderId === input.fromHolderId, 'custody.holder_mismatch', 'container is held by a different user', /* retryable */ true);
+    assertCondition(container.custodyStatus === 'SEALED' || container.custodyStatus === 'RECEIVED' || container.custodyStatus === 'RELEASED_TO_LAB', 'custody.invalid_state', 'container cannot be handed over in its current state', /* retryable */ true);
     const prior = [...this.store.transfers.values()].filter((item) => item.containerId === input.containerId).sort((a, b) => b.transferSequence - a.transferSequence)[0];
     const transfer: CustodyTransfer = {
-      id: this.store.nextId('transfer'),
+      id: transferId,
       tenantId: input.tenantId,
       projectId: input.projectId,
       containerId: input.containerId,
@@ -45,15 +53,55 @@ export class CustodyService {
       version: 1,
     };
     this.store.transfers.set(transfer.id, transfer);
-    container.currentHolderId = input.toHolderId;
-    container.currentLocation = input.toLocation;
-    container.custodyStatus = transfer.status === 'ISOLATED' ? 'ISOLATED' : 'HANDED_OVER';
-    container.sealStatus = input.sealStatus;
-    container.temperatureLog.push({ recordedAt: input.handedOverAt, celsius: input.temperatureCelsius, source: 'HANDHELD' });
-    container.version += 1;
-    this.store.addAudit({ tenantId: input.tenantId, projectId: input.projectId, action: 'custody.handed_over', entity: 'container', entityId: container.id, metadata: { transferId: transfer.id, sequence: transfer.transferSequence, sealStatus: input.sealStatus } });
-    this.store.addOutbox({ tenantId: input.tenantId, projectId: input.projectId, topic: 'custody.handed-over', aggregateId: container.id, payload: JSON.stringify({ transferId: transfer.id, transferSequence: transfer.transferSequence, containerId: container.id }) });
+    this.applyEffects(transfer, container);
+    this.emitCompletion(transfer, container, input);
     return transfer;
+  }
+
+  /** Finish effects that a crash between writing the transfer and committing the operation skipped. */
+  private heal(transfer: CustodyTransfer, input: HandoverInput): CustodyTransfer {
+    const container = assertFound(this.store.containers.get(transfer.containerId), 'custody.container_not_found', 'container not found', /* retryable */ true);
+    // A later receipt has advanced the container beyond this transfer, so its
+    // effects were certainly applied and must never be rewound by replay. In any
+    // other state (SEALED = crash gap, HANDED_OVER/ISOLATED = normal replay)
+    // reapply the idempotent effects.
+    const advancedByReceipt = container.custodyStatus === 'RECEIVED' || container.custodyStatus === 'RELEASED_TO_LAB';
+    if (!advancedByReceipt) this.applyEffects(transfer, container);
+    this.emitCompletion(transfer, container, input);
+    return transfer;
+  }
+
+  private applyEffects(transfer: CustodyTransfer, container: SampleContainer): void {
+    if (!container) return;
+    container.currentHolderId = transfer.toHolderId;
+    container.currentLocation = transfer.toLocation;
+    container.custodyStatus = transfer.status === 'ISOLATED' ? 'ISOLATED' : 'HANDED_OVER';
+    container.sealStatus = transfer.sealStatus;
+    if (!container.temperatureLog.some((reading) => reading.recordedAt === transfer.handedOverAt && reading.celsius === transfer.temperatureCelsius)) {
+      container.temperatureLog.push({ recordedAt: transfer.handedOverAt, celsius: transfer.temperatureCelsius, source: 'HANDHELD' });
+    }
+    container.version += 1;
+  }
+
+  private emitCompletion(transfer: CustodyTransfer, container: { id: string }, input: HandoverInput): void {
+    if (!this.store.hasAudit('custody.handed_over', (metadata) => metadata.transferId === transfer.id)) {
+      this.store.addAudit({ tenantId: input.tenantId, projectId: input.projectId, action: 'custody.handed_over', entity: 'container', entityId: transfer.containerId, metadata: { transferId: transfer.id, sequence: transfer.transferSequence, sealStatus: transfer.sealStatus } });
+    }
+    if (!this.store.hasOutbox('custody.handed-over', container.id)) {
+      this.store.addOutbox({ tenantId: input.tenantId, projectId: input.projectId, topic: 'custody.handed-over', aggregateId: container.id, payload: JSON.stringify({ transferId: transfer.id, transferSequence: transfer.transferSequence, containerId: container.id }) });
+    }
+  }
+
+  private assertSameContent(transfer: CustodyTransfer, input: HandoverInput): void {
+    const same = transfer.containerId === input.containerId
+      && transfer.fromHolderId === input.fromHolderId
+      && transfer.toHolderId === input.toHolderId
+      && transfer.fromLocation === input.fromLocation
+      && transfer.toLocation === input.toLocation
+      && transfer.handedOverAt === input.handedOverAt
+      && transfer.temperatureCelsius === input.temperatureCelsius
+      && transfer.sealStatus === input.sealStatus;
+    assertCondition(same, 'sync.payload_conflict', 'same client operation id was submitted with a different handover payload');
   }
 
   confirmReceipt(transferId: string, input: { receiverId: string; receivedAt: string; temperatureCelsius: number; sealStatus: SealStatus }): CustodyTransfer {

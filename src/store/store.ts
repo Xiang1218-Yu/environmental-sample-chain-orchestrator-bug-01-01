@@ -2,6 +2,7 @@ import type {
   Aliquot, AnalysisBatch, AuditRecord, CustodyTransfer, EvidencePackage, FileRecord, InstrumentRun, OutboxMessage,
   QualityDecision, ReceivingRecord, ResultRevision, SampleContainer, SamplingRecord, SyncRecord,
 } from '../domain/types.js';
+import { HardCrashError } from '../domain/errors.js';
 
 class Mutex {
   private tail = Promise.resolve();
@@ -74,6 +75,15 @@ export class Store {
     return message;
   }
 
+  /** Idempotency probe used when healing a partially applied operation. */
+  hasAudit(action: string, predicate: (metadata: AuditRecord['metadata']) => boolean): boolean {
+    return this.audit.some((record) => record.action === action && predicate(record.metadata));
+  }
+
+  hasOutbox(topic: string, aggregateId: string): boolean {
+    return this.outbox.some((message) => message.topic === topic && message.aggregateId === aggregateId);
+  }
+
   snapshot(): Snapshot {
     return {
       sequence: this.sequence,
@@ -118,6 +128,9 @@ export class Store {
       try {
         return await work();
       } catch (error) {
+        // A simulated hard crash models process death: entities written so far stay
+        // committed (no rollback) and the client retries the whole operation.
+        if (error instanceof HardCrashError) throw error;
         this.restore(before);
         throw error;
       }

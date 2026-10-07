@@ -15,6 +15,7 @@ const sealed = app.sampling.createSealedSample({
   preservation: { temperatureCelsius: 4, method: 'cooled', maxTransitHours: 48 },
   clientDeviceId: 'device_01',
   clientSequence: 1,
+  clientOperationId: 'sample-001',
   containerBarcode: 'CNT-DEMO-001',
   sealCode: 'SEAL-001',
   totalVolumeMl: 100,
